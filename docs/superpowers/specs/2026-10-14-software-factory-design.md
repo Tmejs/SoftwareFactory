@@ -85,6 +85,8 @@ The repository's user-provided Git workflow governs factory development and jobs
 
 The first implementation must not claim a job is complete until the repository's applicable local verification and `git diff --check` pass, an independent review has no Critical or Important findings, the evidence is recorded, the checkpoint branch is pushed, and the `--no-ff` merge into `main` is verified and synchronized. Confirm local, tracking, and remote checkpoint branch SHAs after push, and local, `origin/main`, and remote `main` SHAs after merge and push. Since the factory's initial decision is human-gated, a `READY` job remains pending until that Git workflow completes.
 
+The tracked job record ends at `READY`; it cannot contain the SHA of a later merge without changing that SHA. After the verified merge, the factory creates and pushes a unique annotated `factory/<job-id>` tag pointing to the merge commit. The tag is the durable final delivery record. A later board derives pushed and merged status from Git refs and tags together with the per-job files. An existing tag is never replaced automatically.
+
 ## Evidence and comparison
 
 Each run records its task and baseline commit, mode, workflow version, model profile, stage timestamps, branch and commit IDs, check results, review verdicts and rounds, final decision, and human interventions. Record token usage or cost only when the runtime exposes it; otherwise mark it unavailable rather than estimating. Store enough artifact paths and command output to reconstruct why the decision was made without depending on chat history.
