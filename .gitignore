@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+factory/jobs/*/owner.lock/
+factory/jobs/*/.state-*
