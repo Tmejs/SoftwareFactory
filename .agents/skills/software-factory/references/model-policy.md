@@ -1,0 +1,5 @@
+# Model and experiment policy
+
+Version 1 pins **GPT-6.1 Sol** for orchestration, specification, building, code review, and focused security or UI review. Request **medium** reasoning for orchestration and focused security/UI review; request **high** reasoning for specification, building, and code review. Record actual model and reasoning for each agent run in `state.json`, even when they differ from the request. Record token usage or cost only when Codex exposes it; otherwise use `null`.
+
+The first experiment compares solo and team workflows using the same frozen packet, baseline commit, exact checks, model settings, acceptance criteria, and independent review gate. Vary workflow shape first. Record elapsed time, findings and severity, repair rounds, interventions, and available usage. Preserve both branches and records, and select at most one implementation for merge. Later experiments may compare GPT-6 Astra on hard specification or review and GPT-6 Luna on narrow intake, changing one model variable at a time; those routes are not version 1 behavior.
