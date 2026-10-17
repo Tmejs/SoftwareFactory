@@ -25,6 +25,8 @@ class JobValidationTests(unittest.TestCase):
             "- git-diff-check: git diff --check\n"
         )
         (self.job / "task.md").write_text(self.task_text)
+        (self.job / "spec.md").write_text("# Specification\n\n## Acceptance criteria\nWorks.\n")
+        (self.job / "build.md").write_text("# Build\n\n## Check evidence\n- unit: exit 0\n")
         (self.job / "reviews/round-1").mkdir(parents=True)
         (self.job / "reviews/round-1/code.md").write_text("VERDICT: PASS\n\nNo findings.\n")
         (self.job / "decision.md").write_text("DECISION: READY\n\nChecks and review passed.\n")
@@ -59,6 +61,18 @@ class JobValidationTests(unittest.TestCase):
     def test_ready_rejects_missing_review(self):
         (self.job / "reviews/round-1/code.md").unlink()
         self.assertIn("missing review: code", validate_job(self.job))
+
+    def test_review_rejects_missing_spec_handoff(self):
+        (self.job / "spec.md").unlink()
+        self.state["stage"] = "review"
+        self.state["history"].pop()
+        self.assertIn("missing spec.md", validate_state(self.job, self.state))
+
+    def test_review_rejects_missing_build_handoff(self):
+        (self.job / "build.md").unlink()
+        self.state["stage"] = "review"
+        self.state["history"].pop()
+        self.assertIn("missing build.md", validate_state(self.job, self.state))
 
     def test_ready_rejects_changes_verdict(self):
         (self.job / "reviews/round-1/code.md").write_text("VERDICT: CHANGES\n")
@@ -100,6 +114,37 @@ class JobValidationTests(unittest.TestCase):
         self.state["history"][-1]["to"] = "repair"
         self.assertIn("missing review: security", validate_state(self.job, self.state))
 
+    def test_third_repair_transition_exceeds_limit(self):
+        history = self.state["history"][:4]
+        for round_number in (1, 2, 3):
+            report = self.job / "reviews" / ("round-" + str(round_number)) / "code.md"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("VERDICT: CHANGES\n")
+            history.append({"from": "review", "to": "repair", "at": "2026-10-17T10:04:00Z", "reason": "changes", "round": round_number})
+            if round_number < 3:
+                history.extend([
+                    {"from": "repair", "to": "build", "at": "2026-10-17T10:05:00Z", "reason": "repair started"},
+                    {"from": "build", "to": "review", "at": "2026-10-17T10:06:00Z", "reason": "repair checked"},
+                ])
+        self.state.update(stage="repair", history=history, review_round=3, repair_count=2)
+        self.assertIn("repair limit exceeded", validate_state(self.job, self.state))
+
+    def test_two_repair_cycles_can_end_needs_human(self):
+        history = self.state["history"][:4]
+        for round_number in (1, 2, 3):
+            report = self.job / "reviews" / ("round-" + str(round_number)) / "code.md"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("VERDICT: CHANGES\n")
+            history.append({"from": "review", "to": "needs-human" if round_number == 3 else "repair", "at": "2026-10-17T10:04:00Z", "reason": "changes", "round": round_number})
+            if round_number < 3:
+                history.extend([
+                    {"from": "repair", "to": "build", "at": "2026-10-17T10:05:00Z", "reason": "repair started"},
+                    {"from": "build", "to": "review", "at": "2026-10-17T10:06:00Z", "reason": "repair checked"},
+                ])
+        (self.job / "decision.md").write_text("DECISION: NEEDS-HUMAN\n\nUnresolved review.\n")
+        self.state.update(stage="needs-human", history=history, review_round=3, repair_count=2)
+        self.assertEqual([], validate_state(self.job, self.state))
+
     def test_rejects_sibling_artifact(self):
         self.state["artifacts"].append("factory/jobs/other/task.md")
         self.assertTrue(validate_state(self.job, self.state))
@@ -119,6 +164,14 @@ class JobValidationTests(unittest.TestCase):
         self.state["id"] = "other-job"
         self.assertTrue(validate_state(self.job, self.state))
 
+    def test_malformed_stage_returns_errors_instead_of_crashing(self):
+        self.state["stage"] = []
+        self.assertIn("invalid stage", validate_state(self.job, self.state))
+
+    def test_malformed_review_role_returns_errors_instead_of_crashing(self):
+        self.state["assigned_reviews"] = ["code", []]
+        self.assertIn("invalid assigned_reviews", validate_state(self.job, self.state))
+
     def test_rejects_missing_context(self):
         (self.job / "task.md").write_text(self.task_text.replace("## Context\nExperimental run.\n\n", ""))
         self.assertTrue(validate_job(self.job))
@@ -134,6 +187,13 @@ class JobValidationTests(unittest.TestCase):
     def test_rejects_history_jump(self):
         self.state["history"] = [self.state["history"][0], self.state["history"][1], {"from": "spec", "to": "ready", "at": "2026-10-17T10:02:00Z", "reason": "jump"}]
         self.assertTrue(validate_state(self.job, self.state))
+
+    def test_ready_rejects_review_round_not_reached_in_history(self):
+        second = self.job / "reviews/round-2/code.md"
+        second.parent.mkdir(parents=True)
+        second.write_text("VERDICT: PASS\n")
+        self.state["review_round"] = 2
+        self.assertIn("review_round history mismatch", validate_state(self.job, self.state))
 
 
 if __name__ == "__main__":

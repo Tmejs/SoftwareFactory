@@ -39,9 +39,12 @@ def safe_artifact(job_dir: Path, relative: str) -> Optional[Path]:
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
         return None
-    root = job_dir.resolve().parents[2]
-    candidate = (root / path).resolve()
-    return candidate if candidate.is_relative_to(job_dir.resolve()) else None
+    try:
+        root = job_dir.resolve().parents[2]
+        candidate = (root / path).resolve()
+        return candidate if candidate.is_relative_to(job_dir.resolve()) else None
+    except (OSError, ValueError):
+        return None
 
 
 def _task_sections(job_dir: Path, errors: list[str]) -> dict:
@@ -122,7 +125,7 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
     if state["mode"] not in ("solo", "team"):
         errors.append("invalid mode")
     stage = state["stage"]
-    if stage not in STAGES:
+    if not isinstance(stage, str) or stage not in STAGES:
         errors.append("invalid stage")
     for field in ("baseline", "workflow_commit"):
         if not isinstance(state[field], str) or not SHA_RE.fullmatch(state[field]):
@@ -134,7 +137,7 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
     if not isinstance(state["agent_runs"], list):
         errors.append("invalid agent_runs")
     roles = state["assigned_reviews"]
-    if not isinstance(roles, list) or "code" not in roles or len(roles) != len(set(str(r) for r in roles)) or any(r not in ROLES for r in roles):
+    if not isinstance(roles, list) or "code" not in roles or not all(isinstance(r, str) and r in ROLES for r in roles) or len(roles) != len(set(roles)):
         errors.append("invalid assigned_reviews")
         roles = []
     for field, maximum in (("review_round", 3), ("repair_count", 2)):
@@ -179,22 +182,47 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
         errors.append("missing history")
     else:
         previous = None
+        reached = set()
+        repair_transitions = 0
+        review_entries = 0
         for entry in history:
             if not isinstance(entry, dict) or any(k not in entry for k in ("from", "to", "at", "reason")):
                 errors.append("invalid history entry")
                 break
             source, target = entry["from"], entry["to"]
-            if source != previous or target not in TRANSITIONS.get(source, set()):
+            allowed = TRANSITIONS.get(source, set()) if source is None or isinstance(source, str) else set()
+            if source != previous or not isinstance(target, str) or target not in allowed:
                 errors.append("invalid history transition")
+            if target == "review":
+                review_entries += 1
             if source == "review":
                 round_number = entry.get("round")
                 if type(round_number) is not int or not 1 <= round_number <= 3:
                     errors.append("invalid review exit round")
                 else:
+                    if round_number != review_entries:
+                        errors.append("review exit round mismatch")
                     errors.extend(_review_errors(job_dir, roles, round_number, False))
+                if target == "repair":
+                    repair_transitions += 1
+            if isinstance(target, str):
+                reached.add(target)
             previous = target
         if previous != stage:
             errors.append("history stage mismatch")
+        if repair_transitions > 2:
+            errors.append("repair limit exceeded")
+        if type(state["repair_count"]) is int and repair_transitions != state["repair_count"]:
+            errors.append("repair_count history mismatch")
+        if type(state["review_round"]) is int and review_entries != state["review_round"]:
+            errors.append("review_round history mismatch")
+        for reached_stage, artifact in (("build", "spec.md"), ("review", "build.md")):
+            if reached_stage in reached:
+                try:
+                    if not (job_dir / artifact).read_text().strip():
+                        errors.append("missing " + artifact)
+                except OSError:
+                    errors.append("missing " + artifact)
     if stage == "ready":
         round_number = state["review_round"]
         if type(round_number) is not int or round_number < 1:
