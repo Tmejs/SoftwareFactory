@@ -37,8 +37,8 @@ class JobValidationTests(unittest.TestCase):
             "agent_runs": [], "assigned_reviews": ["code"], "review_round": 1,
             "repair_count": 0,
             "checks": [
-                {"name": "unit", "command": "python3 -m unittest discover -s tests -v", "status": "pass", "output": "OK"},
-                {"name": "git-diff-check", "command": "git diff --check", "status": "pass", "output": "clean"},
+                {"name": "unit", "command": "python3 -m unittest discover -s tests -v", "status": "pass", "exit_code": 0, "output": "OK"},
+                {"name": "git-diff-check", "command": "git diff --check", "status": "pass", "exit_code": 0, "output": ""},
             ],
             "human_interventions": [],
             "artifacts": ["factory/jobs/example-job/task.md", "factory/jobs/example-job/reviews/round-1/code.md", "factory/jobs/example-job/decision.md"],
@@ -98,12 +98,28 @@ class JobValidationTests(unittest.TestCase):
         self.state["checks"][0]["status"] = "unavailable"
         self.assertIn("check not passed: unit", validate_state(self.job, self.state))
 
+    def test_ready_rejects_check_without_exit_code(self):
+        self.state["checks"][0].pop("exit_code")
+        self.assertIn("invalid check exit code: unit", validate_state(self.job, self.state))
+
+    def test_ready_rejects_pass_with_nonzero_exit_code(self):
+        self.state["checks"][0]["exit_code"] = 1
+        self.assertIn("invalid check exit code: unit", validate_state(self.job, self.state))
+
+    def test_ready_rejects_null_output(self):
+        self.state["checks"][0]["output"] = None
+        self.assertIn("invalid check output: unit", validate_state(self.job, self.state))
+
+    def test_silent_passing_command_has_empty_output(self):
+        self.assertEqual([], validate_state(self.job, self.state))
+
     def test_rejects_third_repair_cycle(self):
         self.state["repair_count"] = 3
         self.assertTrue(validate_state(self.job, self.state))
 
     def test_pending_review_is_valid_until_round_closes(self):
         (self.job / "reviews/round-1/code.md").unlink()
+        self.state["artifacts"].remove("factory/jobs/example-job/reviews/round-1/code.md")
         self.state["stage"] = "review"
         self.state["history"].pop()
         self.assertEqual([], validate_state(self.job, self.state))
@@ -159,6 +175,54 @@ class JobValidationTests(unittest.TestCase):
         (self.job / "escape.md").symlink_to(outside)
         self.state["artifacts"].append("factory/jobs/example-job/escape.md")
         self.assertTrue(validate_state(self.job, self.state))
+
+    def test_rejects_required_review_symlink_escape_even_when_unlisted(self):
+        outside = self.root / "outside-review.md"
+        outside.write_text("VERDICT: PASS\n")
+        report = self.job / "reviews/round-1/code.md"
+        report.unlink()
+        report.symlink_to(outside)
+        self.state["artifacts"] = ["factory/jobs/example-job/task.md", "factory/jobs/example-job/decision.md"]
+        self.assertIn("unsafe review: code", validate_state(self.job, self.state))
+
+    def test_rejects_review_parent_symlink_escape(self):
+        outside = self.root / "outside-round"
+        outside.mkdir()
+        (outside / "code.md").write_text("VERDICT: PASS\n")
+        report = self.job / "reviews/round-1/code.md"
+        report.unlink()
+        report.parent.rmdir()
+        report.parent.symlink_to(outside)
+        self.state["artifacts"] = ["factory/jobs/example-job/task.md", "factory/jobs/example-job/decision.md"]
+        self.assertIn("unsafe review: code", validate_state(self.job, self.state))
+
+    def test_rejects_required_task_symlink_escape(self):
+        outside = self.root / "outside-task.md"
+        outside.write_text(self.task_text)
+        (self.job / "task.md").unlink()
+        (self.job / "task.md").symlink_to(outside)
+        self.state["artifacts"] = []
+        self.assertIn("unsafe task.md", validate_state(self.job, self.state))
+
+    def test_rejects_missing_listed_artifact(self):
+        self.state["artifacts"].append("factory/jobs/example-job/missing.md")
+        self.assertIn("missing artifact: factory/jobs/example-job/missing.md", validate_state(self.job, self.state))
+
+    def test_rejects_malformed_model_profile(self):
+        self.state["model_profile"] = {"builder": None}
+        self.assertIn("invalid model_profile: builder", validate_state(self.job, self.state))
+
+    def test_rejects_malformed_agent_run(self):
+        self.state["agent_runs"] = [None]
+        self.assertIn("invalid agent run: 0", validate_state(self.job, self.state))
+
+    def test_rejects_malformed_intervention(self):
+        self.state["human_interventions"] = [None]
+        self.assertIn("invalid human intervention: 0", validate_state(self.job, self.state))
+
+    def test_rejects_missing_history_timestamp(self):
+        self.state["history"][0]["at"] = None
+        self.assertIn("invalid history timestamp", validate_state(self.job, self.state))
 
     def test_rejects_mismatched_job_id(self):
         self.state["id"] = "other-job"

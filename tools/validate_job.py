@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -47,11 +48,33 @@ def safe_artifact(job_dir: Path, relative: str) -> Optional[Path]:
         return None
 
 
-def _task_sections(job_dir: Path, errors: list[str]) -> dict:
+def _read_job_file(job_dir: Path, relative: str, label: str, errors: list[str]) -> Optional[str]:
+    """Read only a file contained by this job, including through symlinks."""
     try:
-        content = (job_dir / "task.md").read_text()
-    except OSError:
-        errors.append("missing task.md")
+        root = job_dir.resolve()
+        path = (job_dir / relative).resolve()
+        if not path.is_relative_to(root):
+            errors.append("unsafe " + label)
+            return None
+        return path.read_text()
+    except (OSError, ValueError):
+        errors.append("missing " + label)
+        return None
+
+
+def _utc_time(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.utcoffset() == timedelta(0)
+
+
+def _task_sections(job_dir: Path, errors: list[str]) -> dict:
+    content = _read_job_file(job_dir, "task.md", "task.md", errors)
+    if content is None:
         return {}
     sections = {}
     current = None
@@ -91,12 +114,12 @@ def _review_errors(job_dir: Path, roles: list, round_number: int, require_pass: 
     for role in roles:
         if role not in ROLES:
             continue
-        path = job_dir / "reviews" / ("round-" + str(round_number)) / (role + ".md")
-        try:
-            first = path.read_text().splitlines()[0]
-        except (OSError, IndexError):
-            errors.append("missing review: " + role)
+        content = _read_job_file(job_dir, "reviews/round-" + str(round_number) + "/" + role + ".md", "review: " + role, errors)
+        if content is None or not content.splitlines():
+            if content is not None:
+                errors.append("missing review: " + role)
             continue
+        first = content.splitlines()[0]
         if first not in ("VERDICT: PASS", "VERDICT: CHANGES"):
             errors.append("invalid review verdict: " + role)
         elif require_pass and first != "VERDICT: PASS":
@@ -132,10 +155,20 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
             errors.append("invalid " + field)
     if not isinstance(state["branch"], str) or not BRANCH_RE.fullmatch(state["branch"]):
         errors.append("invalid branch")
-    if not isinstance(state["model_profile"], dict) or not state["model_profile"]:
+    profile = state["model_profile"]
+    if not isinstance(profile, dict) or not profile:
         errors.append("invalid model_profile")
-    if not isinstance(state["agent_runs"], list):
+    else:
+        for role, config in profile.items():
+            if not isinstance(role, str) or not role or not isinstance(config, dict) or not isinstance(config.get("model"), str) or not config["model"].strip() or not isinstance(config.get("reasoning"), str) or not config["reasoning"].strip():
+                errors.append("invalid model_profile: " + str(role))
+    runs = state["agent_runs"]
+    if not isinstance(runs, list):
         errors.append("invalid agent_runs")
+    else:
+        for index, run in enumerate(runs):
+            if not isinstance(run, dict) or not isinstance(run.get("role"), str) or not run["role"].strip() or not _utc_time(run.get("started_at")) or not (run.get("ended_at") is None or _utc_time(run.get("ended_at"))) or any(key not in run for key in ("model", "reasoning", "usage", "ended_at")) or any(value is not None and (not isinstance(value, str) or not value.strip()) for value in (run.get("model"), run.get("reasoning"))) or (run.get("usage") is not None and not isinstance(run.get("usage"), dict)):
+                errors.append("invalid agent run: " + str(index))
     roles = state["assigned_reviews"]
     if not isinstance(roles, list) or "code" not in roles or not all(isinstance(r, str) and r in ROLES for r in roles) or len(roles) != len(set(roles)):
         errors.append("invalid assigned_reviews")
@@ -144,15 +177,23 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
         value = state[field]
         if type(value) is not int or not 0 <= value <= maximum:
             errors.append("invalid " + field)
-    if not isinstance(state["human_interventions"], list):
+    interventions = state["human_interventions"]
+    if not isinstance(interventions, list):
         errors.append("invalid human_interventions")
+    else:
+        for index, item in enumerate(interventions):
+            if not isinstance(item, dict) or not _utc_time(item.get("at")) or not isinstance(item.get("question"), str) or not item["question"].strip() or "decision" not in item or (item["decision"] is not None and (not isinstance(item["decision"], str) or not item["decision"].strip())):
+                errors.append("invalid human intervention: " + str(index))
     artifacts = state["artifacts"]
     if not isinstance(artifacts, list):
         errors.append("invalid artifacts")
     else:
         for relative in artifacts:
-            if not isinstance(relative, str) or not relative or safe_artifact(job_dir, relative) is None:
+            resolved = safe_artifact(job_dir, relative) if isinstance(relative, str) and relative else None
+            if resolved is None:
                 errors.append("unsafe artifact: " + str(relative))
+            elif not resolved.is_file():
+                errors.append("missing artifact: " + relative)
     sections = _task_sections(job_dir, errors)
     if sections.get("Target repository") and sections["Target repository"] != REPO:
         errors.append("wrong target repository")
@@ -165,7 +206,7 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
         checks = []
     evidence = {}
     for check in checks:
-        if not isinstance(check, dict) or any(k not in check for k in ("name", "command", "status", "output")):
+        if not isinstance(check, dict) or any(k not in check for k in ("name", "command", "status")):
             errors.append("invalid check record")
             continue
         name = check["name"]
@@ -175,8 +216,15 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
         if name in evidence:
             errors.append("duplicate check: " + name)
         evidence[name] = check
+        if not isinstance(check["command"], str) or not check["command"].strip():
+            errors.append("invalid check command: " + name)
         if check["status"] not in ("pass", "fail", "unavailable", "inapplicable"):
             errors.append("invalid check status: " + name)
+        exit_code = check.get("exit_code")
+        if (check["status"] == "pass" and (type(exit_code) is not int or exit_code != 0)) or (check["status"] == "fail" and (type(exit_code) is not int or exit_code == 0)) or (check["status"] in ("unavailable", "inapplicable") and exit_code is not None):
+            errors.append("invalid check exit code: " + name)
+        if not isinstance(check.get("output"), str):
+            errors.append("invalid check output: " + name)
     history = state["history"]
     if not isinstance(history, list) or not history:
         errors.append("missing history")
@@ -190,6 +238,10 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
                 errors.append("invalid history entry")
                 break
             source, target = entry["from"], entry["to"]
+            if not _utc_time(entry["at"]):
+                errors.append("invalid history timestamp")
+            if not isinstance(entry["reason"], str) or not entry["reason"].strip():
+                errors.append("invalid history reason")
             allowed = TRANSITIONS.get(source, set()) if source is None or isinstance(source, str) else set()
             if source != previous or not isinstance(target, str) or target not in allowed:
                 errors.append("invalid history transition")
@@ -218,10 +270,8 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
             errors.append("review_round history mismatch")
         for reached_stage, artifact in (("build", "spec.md"), ("review", "build.md")):
             if reached_stage in reached:
-                try:
-                    if not (job_dir / artifact).read_text().strip():
-                        errors.append("missing " + artifact)
-                except OSError:
+                content = _read_job_file(job_dir, artifact, artifact, errors)
+                if content is not None and not content.strip():
                     errors.append("missing " + artifact)
     if stage == "ready":
         round_number = state["review_round"]
@@ -237,17 +287,13 @@ def validate_state(job_dir: Path, state: dict) -> list[str]:
                 errors.append("check command mismatch: " + name)
             elif check["status"] != "pass":
                 errors.append("check not passed: " + name)
-        try:
-            decision = (job_dir / "decision.md").read_text().splitlines()[0]
-        except (OSError, IndexError):
-            decision = None
+        decision_text = _read_job_file(job_dir, "decision.md", "decision.md", errors)
+        decision = decision_text.splitlines()[0] if decision_text and decision_text.splitlines() else None
         if decision != "DECISION: READY":
             errors.append("missing READY decision")
     elif stage in ("needs-human", "failed"):
-        try:
-            decision = (job_dir / "decision.md").read_text().splitlines()[0]
-        except (OSError, IndexError):
-            decision = None
+        decision_text = _read_job_file(job_dir, "decision.md", "decision.md", errors)
+        decision = decision_text.splitlines()[0] if decision_text and decision_text.splitlines() else None
         if decision != "DECISION: " + stage.upper():
             errors.append("missing terminal decision")
     return errors

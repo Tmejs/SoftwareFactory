@@ -21,21 +21,21 @@ An orchestrator calls `python3 tools/job_io.py claim <job-dir> <owner-id>` befor
 | `baseline` | 40-character starting commit SHA |
 | `workflow_commit` | 40-character commit SHA pinning the workflow instructions used by this run |
 | `branch` | `codex/checkpoint-<number>-<short-name>` |
-| `model_profile` | Requested model and reasoning per role |
-| `agent_runs` | Actual role, model, reasoning, start/end UTC times, and usage or `null` when unavailable |
+| `model_profile` | Per-role objects with nonempty requested `model` and `reasoning` strings |
+| `agent_runs` | Objects with `role`, actual `model` and `reasoning` (or `null` if unavailable), UTC `started_at`, UTC `ended_at` (or `null` while running), and `usage` object or `null` |
 | `assigned_reviews` | Unique roles; always `code`, optionally `security` and `ui` |
 | `review_round` | Integer 0–3; 0 before first review |
 | `repair_count` | Integer 0–2 |
-| `checks` | Objects with `name`, exact `command`, `status` (`pass`, `fail`, `unavailable`, `inapplicable`), and `output` |
-| `human_interventions` | Timestamped questions and decisions |
-| `artifacts` | Repository-relative paths; every resolved path remains inside this job directory |
-| `history` | Ordered `{from, to, at, reason}` transitions; review exits also have `round` |
+| `checks` | Objects with `name`, exact `command`, `status` (`pass`, `fail`, `unavailable`, `inapplicable`), integer `exit_code` (0 for pass, nonzero for fail, `null` otherwise), and string `output` (empty for a silent success) |
+| `human_interventions` | Objects with UTC `at`, nonempty `question`, and nonempty `decision` or `null` while unanswered |
+| `artifacts` | Existing file paths relative to the repository; resolved paths, including symlinks, must remain inside this job directory |
+| `history` | Ordered `{from, to, at, reason}` transitions; `at` is UTC and `reason` nonempty; review exits also have `round` |
 
-The first history entry is `null → intake`. Later transitions are `intake → spec`, `spec → build|needs-human`, `build → review|needs-human|failed`, `review → repair|ready|needs-human|failed`, and `repair → build|needs-human|failed`. A terminal stage has no outgoing transition. Reaching `build` requires a nonempty `spec.md`; reaching `review` requires a nonempty `build.md`. Each `build → review` transition increments `review_round`; each `review → repair` transition increments `repair_count`; a third repair transition is invalid. A review exit's `round` must match that history count. Before leaving `review`, every assigned report for that round must exist and start with `VERDICT: PASS` or `VERDICT: CHANGES`. A pending review may lack reports. `ready` requires every final-round verdict to be `PASS`, every task-declared check to have matching command and `pass` status, and `decision.md` to start with `DECISION: READY`. Terminal decisions start with `DECISION: NEEDS-HUMAN` or `DECISION: FAILED` as applicable.
+The first history entry is `null → intake`. Later transitions are `intake → spec`, `spec → build|needs-human`, `build → review|needs-human|failed`, `review → repair|ready|needs-human|failed`, and `repair → build|needs-human|failed`. A terminal stage has no outgoing transition. Reaching `build` requires a nonempty `spec.md`; reaching `review` requires a nonempty `build.md`. Each `build → review` transition increments `review_round`; each `review → repair` transition increments `repair_count`; a third repair transition is invalid. A review exit's `round` must match that history count. Before leaving `review`, every assigned report for that round must exist and start with `VERDICT: PASS` or `VERDICT: CHANGES`. A pending review may lack reports. `ready` requires every final-round verdict to be `PASS`, every task-declared check to have matching command and `pass` status with exit code 0, and `decision.md` to start with `DECISION: READY`. Terminal decisions start with `DECISION: NEEDS-HUMAN` or `DECISION: FAILED` as applicable. Every required file is checked for job containment before it is read, even if omitted from `artifacts`.
 
 ## Complete READY example
 
-This example belongs at `factory/jobs/example-job/`. Its `task.md` declares exactly the two checks shown below, and `reviews/round-1/code.md` starts with `VERDICT: PASS`.
+This example belongs at `factory/jobs/example-job/`. Its `task.md` declares exactly the two checks shown below; nonempty `spec.md` and `build.md` exist, and `reviews/round-1/code.md` starts with `VERDICT: PASS`.
 
 ```json
 {
@@ -52,8 +52,8 @@ This example belongs at `factory/jobs/example-job/`. Its `task.md` declares exac
   "review_round": 1,
   "repair_count": 0,
   "checks": [
-    {"name": "unit", "command": "python3 -m unittest discover -s tests -v", "status": "pass", "output": "19 tests passed"},
-    {"name": "git-diff-check", "command": "git diff --check", "status": "pass", "output": "clean"}
+    {"name": "unit", "command": "python3 -m unittest discover -s tests -v", "status": "pass", "exit_code": 0, "output": "19 tests passed"},
+    {"name": "git-diff-check", "command": "git diff --check", "status": "pass", "exit_code": 0, "output": ""}
   ],
   "human_interventions": [],
   "artifacts": ["factory/jobs/example-job/task.md", "factory/jobs/example-job/reviews/round-1/code.md", "factory/jobs/example-job/decision.md"],
