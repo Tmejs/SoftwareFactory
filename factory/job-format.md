@@ -2,6 +2,8 @@
 
 One job lives at `factory/jobs/<id>/` in its checkpoint worktree. `task.md` is frozen at intake; a changed requirement starts a new versioned job from the original baseline. The orchestrator owns `state.json` and `decision.md`; each reviewer owns only `reviews/round-N/<role>.md`. Runtime `owner.lock/` and `.state-*` files are not committed.
 
+An orchestrator calls `python3 tools/job_io.py claim <job-dir> <owner-id>` before writing state. Creation of `owner.lock/` is atomic on the local filesystem; `owner.json` records that ID and a UTC claim time. A second claim fails. Only the matching owner can run `write-state <job-dir> <owner-id> <candidate-json-file>` or `release <job-dir> <owner-id>`. `write-state` validates the candidate, writes and syncs a temporary file in the job directory, then atomically replaces `state.json`. A failed replacement leaves the previous state intact. The helper never removes an abandoned claim based on age; a human must resolve it.
+
 ## Task packet
 
 `task.md` has nonempty level-two sections named `Objective`, `Scope`, `Context`, `Target repository`, `Baseline commit`, `Acceptance criteria`, and `Checks`. The target repository in v1 is `https://github.com/Tmejs/SoftwareFactory`. The baseline is the exact 40-character lowercase Git SHA in `state.json`. Each check is a `- name: exact shell command` line. A `- git-diff-check: git diff --check` line is mandatory. Every declared check must eventually have matching state evidence before `READY`; failed, unavailable, or inapplicable checks require a stopped run and a revised packet.
